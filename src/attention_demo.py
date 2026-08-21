@@ -76,8 +76,25 @@ print(scale)
 print("\nScaled attention scores:")
 print(scaled_scores)
 
-# Convert scaled scores into attention weights
-attention_weights = torch.softmax(scaled_scores, dim=-1)
+# Create a causal mask
+mask = torch.tril(
+    torch.ones(context_length, context_length)
+)
+
+print("\nCausal mask:")
+print(mask)
+
+# Prevent tokens from attending to future positions
+masked_scores = scaled_scores.masked_fill(
+    mask == 0,
+    float("-inf")
+)
+
+print("\nMasked attention scores:")
+print(masked_scores)
+
+# Convert masked scores into attention weights
+attention_weights = torch.softmax(masked_scores, dim=-1)
 
 print("\nAttention weight shape:")
 print(attention_weights.shape)
@@ -86,9 +103,7 @@ print("\nAttention weights:")
 print(attention_weights)
 
 print("\nRow sums:")
-print(attention_weights.sum(dim=-1))
-
-# Use the attention weights to combine the Value vectors
+print(attention_weights.sum(dim=-1))# Use the attention weights to combine the Value vectors
 attention_output = attention_weights @ V
 
 print("\nAttention output shape:")
