@@ -1,22 +1,37 @@
 import torch
 
 from model import MiniGPT
+from dataset import CharacterTokenizer
 
 
 # -----------------------------
 # SETTINGS
 # -----------------------------
 
-context_length = 8
-embedding_size = 32
-num_layers = 2
-temperature = 0.8
+context_length = 128
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+embedding_size = 128
+num_heads = 4
+num_layers = 4
+
+temperature = 0.8
+top_k = 10
+
+max_new_tokens = 500
 
 
 # -----------------------------
-# LOAD TRAINING DATA
+# DEVICE
+# -----------------------------
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+print("Using device:")
+print(device)
+
+
+# -----------------------------
+# LOAD DATASET
 # -----------------------------
 
 with open(
@@ -27,20 +42,16 @@ with open(
     text = file.read()
 
 
-# Recreate the same vocabulary used during training
-characters = sorted(list(set(text)))
+# -----------------------------
+# CREATE TOKENIZER
+# -----------------------------
 
-vocab_size = len(characters)
+tokenizer = CharacterTokenizer(text)
 
-character_to_id = {
-    character: index
-    for index, character in enumerate(characters)
-}
+vocab_size = tokenizer.vocab_size
 
-id_to_character = {
-    index: character
-    for character, index in character_to_id.items()
-}
+print("\nVocabulary size:")
+print(vocab_size)
 
 
 # -----------------------------
@@ -51,8 +62,11 @@ model = MiniGPT(
     vocab_size=vocab_size,
     embedding_size=embedding_size,
     context_length=context_length,
-    num_layers=num_layers
+    num_layers=num_layers,
+    num_heads=num_heads
 )
+
+model = model.to(device)
 
 
 # -----------------------------
@@ -66,90 +80,164 @@ model.load_state_dict(
     )
 )
 
-model = model.to(device)
-
-
-# Put the model into evaluation mode
 model.eval()
 
 
 # -----------------------------
-# GENERATE TEXT
+# GENERATE FUNCTION
 # -----------------------------
 
-def generate(prompt, max_new_tokens, temperature):
+def generate(
+    prompt,
+    max_new_tokens,
+    temperature,
+    top_k
+):
 
-    # Convert prompt characters into token IDs
-    token_ids = [
-        character_to_id[character]
-        for character in prompt
-    ]
+    # -----------------------------
+    # ENCODE PROMPT
+    # -----------------------------
 
-    # Generate one character at a time
+    token_ids = tokenizer.encode(
+        prompt
+    )
+
+
+    # -----------------------------
+    # GENERATION LOOP
+    # -----------------------------
+
     for _ in range(max_new_tokens):
 
-        # Only use the most recent context_length tokens
-        context = token_ids[-context_length:]
+        # Only give the model the most
+        # recent context window.
+        context = token_ids[
+            -context_length:
+        ]
 
-        # Convert the context into a tensor
         x = torch.tensor(
             [context],
             dtype=torch.long,
             device=device
         )
 
-        # Run the model without tracking gradients
+
+        # -----------------------------
+        # MODEL PREDICTION
+        # -----------------------------
+
         with torch.no_grad():
+
             logits = model(x)
 
-        # Get predictions for the final position
-        next_token_logits = logits[0, -1]
 
-        # Adjust logits using temperature
-        next_token_logits = next_token_logits / temperature
+        # We only care about the prediction
+        # at the final position.
+        next_token_logits = logits[
+            0,
+            -1
+        ]
 
-        # Convert logits into probabilities
+
+        # -----------------------------
+        # TEMPERATURE
+        # -----------------------------
+
+        next_token_logits = (
+            next_token_logits
+            / temperature
+        )
+
+
+        # -----------------------------
+        # TOP-K
+        # -----------------------------
+
+        top_k_values, _ = torch.topk(
+            next_token_logits,
+            min(
+                top_k,
+                vocab_size
+            )
+        )
+
+        minimum_top_k_value = (
+            top_k_values[-1]
+        )
+
+        next_token_logits[
+            next_token_logits
+            < minimum_top_k_value
+        ] = float("-inf")
+
+
+        # -----------------------------
+        # PROBABILITIES
+        # -----------------------------
+
         probabilities = torch.softmax(
             next_token_logits,
             dim=-1
         )
 
-        # Randomly choose the next token based on probability
+
+        # -----------------------------
+        # SAMPLE TOKEN
+        # -----------------------------
+
         next_token_id = torch.multinomial(
             probabilities,
             num_samples=1
         ).item()
 
-        # Add the new token to the generated sequence
-        token_ids.append(next_token_id)
 
-    # Convert token IDs back into characters
-    generated_text = "".join(
-        id_to_character[token_id]
-        for token_id in token_ids
+        # Add prediction to sequence
+        token_ids.append(
+            next_token_id
+        )
+
+
+    # -----------------------------
+    # DECODE
+    # -----------------------------
+
+    return tokenizer.decode(
+        token_ids
     )
 
-    return generated_text
+
+# -----------------------------
+# PROMPT
+# -----------------------------
+
+prompt = "Alice"
 
 
 # -----------------------------
-# TEST GENERATION
+# GENERATE
 # -----------------------------
-
-prompt = "The cat "
 
 generated_text = generate(
     prompt=prompt,
-    max_new_tokens=100,
-    temperature=temperature
+    max_new_tokens=max_new_tokens,
+    temperature=temperature,
+    top_k=top_k
 )
 
 
-print("Prompt:")
+# -----------------------------
+# OUTPUT
+# -----------------------------
+
+print("\nPrompt:")
 print(prompt)
 
 print("\nTemperature:")
 print(temperature)
 
-print("\nGenerated text:")
+print("\nTop-K:")
+print(top_k)
+
+print("\nGenerated text:\n")
+
 print(generated_text)

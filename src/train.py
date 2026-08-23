@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 
 from model import MiniGPT
+from dataset import TextDataset
 
 
 # -----------------------------
@@ -10,16 +11,24 @@ from model import MiniGPT
 
 torch.manual_seed(42)
 
-context_length = 8
-batch_size = 4
-embedding_size = 32
-num_layers = 2
+context_length = 128
+batch_size = 32
+
+embedding_size = 128
+num_heads = 4
+num_layers = 4
+
 learning_rate = 0.001
-training_steps = 2000
+
+training_steps = 5000
+evaluation_interval = 100
+evaluation_batches = 20
+
+train_split = 0.90
 
 
 # -----------------------------
-# LOAD TRAINING DATA
+# LOAD TEXT
 # -----------------------------
 
 with open(
@@ -30,77 +39,78 @@ with open(
     text = file.read()
 
 
-# Create the vocabulary
-characters = sorted(list(set(text)))
+# -----------------------------
+# CREATE DATASET
+# -----------------------------
 
-vocab_size = len(characters)
-
-character_to_id = {
-    character: index
-    for index, character in enumerate(characters)
-}
-
-id_to_character = {
-    index: character
-    for character, index in character_to_id.items()
-}
-
-
-# Convert the entire text into token IDs
-data = torch.tensor(
-    [character_to_id[character] for character in text],
-    dtype=torch.long
+dataset = TextDataset(
+    text=text,
+    context_length=context_length,
+    train_split=train_split
 )
 
 
+print("Total characters:")
+print(len(dataset.data))
+
+print("\nVocabulary size:")
+print(dataset.tokenizer.vocab_size)
+
+print("\nTraining characters:")
+print(len(dataset.train_data))
+
+print("\nValidation characters:")
+print(len(dataset.validation_data))
+
+
 # -----------------------------
-# CREATE BATCHES
+# DEVICE
 # -----------------------------
 
-def get_batch():
-    # Choose random starting positions
-    starts = torch.randint(
-        len(data) - context_length,
-        (batch_size,)
-    )
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Create inputs and targets
-    x = torch.stack([
-        data[start:start + context_length]
-        for start in starts
-    ])
-
-    y = torch.stack([
-        data[start + 1:start + context_length + 1]
-        for start in starts
-    ])
-
-    return x, y
+print("\nUsing device:")
+print(device)
 
 
 # -----------------------------
 # CREATE MODEL
 # -----------------------------
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
-print("Using device:", device)
-
 model = MiniGPT(
-    vocab_size=vocab_size,
+    vocab_size=dataset.tokenizer.vocab_size,
     embedding_size=embedding_size,
     context_length=context_length,
-    num_layers=num_layers
+    num_layers=num_layers,
+    num_heads=num_heads
 )
 
 model = model.to(device)
 
 
 # -----------------------------
-# LOSS AND OPTIMIZER
+# PARAMETER COUNT
+# -----------------------------
+
+total_parameters = sum(
+    parameter.numel()
+    for parameter in model.parameters()
+)
+
+print("\nModel parameters:")
+print(f"{total_parameters:,}")
+
+
+# -----------------------------
+# LOSS FUNCTION
 # -----------------------------
 
 loss_function = nn.CrossEntropyLoss()
+
+
+# -----------------------------
+# OPTIMIZER
+# -----------------------------
 
 optimizer = torch.optim.AdamW(
     model.parameters(),
@@ -109,71 +119,160 @@ optimizer = torch.optim.AdamW(
 
 
 # -----------------------------
+# EVALUATION
+# -----------------------------
+
+def calculate_average_loss(split):
+
+    # Put model into evaluation mode
+    model.eval()
+
+    losses = []
+
+    with torch.no_grad():
+
+        for _ in range(evaluation_batches):
+
+            x, y = dataset.get_batch(
+                batch_size=batch_size,
+                split=split
+            )
+
+            x = x.to(device)
+            y = y.to(device)
+
+            logits = model(x)
+
+            # Flatten predictions
+            logits = logits.reshape(
+                batch_size * context_length,
+                dataset.tokenizer.vocab_size
+            )
+
+            # Flatten targets
+            y = y.reshape(
+                batch_size * context_length
+            )
+
+            loss = loss_function(
+                logits,
+                y
+            )
+
+            losses.append(
+                loss.item()
+            )
+
+    # Return model to training mode
+    model.train()
+
+    return sum(losses) / len(losses)
+
+
+# -----------------------------
 # TRAINING LOOP
 # -----------------------------
 
+model.train()
+
+
 for step in range(training_steps):
 
-    # Get a random batch
-    x, y = get_batch()
+    # -----------------------------
+    # GET TRAINING BATCH
+    # -----------------------------
 
-    # Move batch to GPU
+    x, y = dataset.get_batch(
+        batch_size=batch_size,
+        split="train"
+    )
+
     x = x.to(device)
     y = y.to(device)
 
-    # Clear old gradients
+
+    # -----------------------------
+    # CLEAR OLD GRADIENTS
+    # -----------------------------
+
     optimizer.zero_grad()
 
-    # Forward pass
+
+    # -----------------------------
+    # FORWARD PASS
+    # -----------------------------
+
     logits = model(x)
 
-    # Reshape for CrossEntropyLoss
-    #
-    # Current:
-    # logits = [batch_size, context_length, vocab_size]
-    # targets = [batch_size, context_length]
-    #
-    # CrossEntropyLoss expects:
-    # logits = [examples, vocab_size]
-    # targets = [examples]
+
+    # -----------------------------
+    # RESHAPE FOR LOSS
+    # -----------------------------
 
     logits = logits.reshape(
         batch_size * context_length,
-        vocab_size
+        dataset.tokenizer.vocab_size
     )
 
     y = y.reshape(
         batch_size * context_length
     )
 
-    # Calculate loss
+
+    # -----------------------------
+    # CALCULATE LOSS
+    # -----------------------------
+
     loss = loss_function(
         logits,
         y
     )
 
-    # Backpropagation
+
+    # -----------------------------
+    # BACKPROPAGATION
+    # -----------------------------
+
     loss.backward()
 
-    # Update parameters
+
+    # -----------------------------
+    # UPDATE PARAMETERS
+    # -----------------------------
+
     optimizer.step()
 
-    # Print progress
-    if step % 100 == 0:
+
+    # -----------------------------
+    # EVALUATION
+    # -----------------------------
+
+    if step % evaluation_interval == 0:
+
+        train_loss = calculate_average_loss(
+            split="train"
+        )
+
+        validation_loss = calculate_average_loss(
+            split="validation"
+        )
+
         print(
             f"Step {step}: "
-            f"Loss = {loss.item():.4f}"
+            f"Train Loss = {train_loss:.4f} | "
+            f"Validation Loss = {validation_loss:.4f}"
         )
 
 
 # -----------------------------
-# SAVE TRAINED MODEL
+# SAVE MODEL
 # -----------------------------
 
 torch.save(
     model.state_dict(),
     "model_weights.pth"
 )
+
 
 print("\nTraining complete!")
 print("Model saved as model_weights.pth")

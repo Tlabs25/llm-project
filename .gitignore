@@ -1,0 +1,14 @@
+# Python virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Model weights / checkpoints
+*.pth
+*.pt
+
+# IDE files
+.vscode/
+.idea/

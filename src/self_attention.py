@@ -1,15 +1,37 @@
 import torch
 import torch.nn as nn
-import math
+import torch.nn.functional as F
 
 
-class SelfAttention(nn.Module):
-    def __init__(self, embedding_size, context_length):
+class MultiHeadSelfAttention(nn.Module):
+
+    def __init__(
+        self,
+        embedding_size,
+        num_heads,
+        context_length
+    ):
         super().__init__()
 
-        self.embedding_size = embedding_size
+        # Make sure the embedding can be divided
+        # evenly among all attention heads.
+        assert embedding_size % num_heads == 0
 
-        # Create the Query, Key, and Value layers
+        self.embedding_size = embedding_size
+        self.num_heads = num_heads
+
+        # Example:
+        #
+        # embedding_size = 128
+        # num_heads = 4
+        #
+        # head_size = 32
+        self.head_size = embedding_size // num_heads
+
+        # -----------------------------
+        # QUERY, KEY, VALUE PROJECTIONS
+        # -----------------------------
+
         self.query = nn.Linear(
             embedding_size,
             embedding_size,
@@ -28,92 +50,208 @@ class SelfAttention(nn.Module):
             bias=False
         )
 
-        # Create and store the causal mask
-        self.register_buffer(
-            "mask",
-            torch.tril(
-                torch.ones(
-                    context_length,
-                    context_length
-                )
+        # -----------------------------
+        # OUTPUT PROJECTION
+        # -----------------------------
+
+        self.output_projection = nn.Linear(
+            embedding_size,
+            embedding_size
+        )
+
+        # -----------------------------
+        # CAUSAL MASK
+        # -----------------------------
+
+        mask = torch.tril(
+            torch.ones(
+                context_length,
+                context_length
             )
         )
 
+        self.register_buffer(
+            "causal_mask",
+            mask
+        )
+
+
     def forward(self, x):
+
         # x shape:
+        #
         # [batch_size, sequence_length, embedding_size]
 
         batch_size, sequence_length, embedding_size = x.shape
 
-        # Create Query, Key, and Value vectors
+        # -----------------------------
+        # CREATE Q, K, V
+        # -----------------------------
+
         queries = self.query(x)
         keys = self.key(x)
         values = self.value(x)
 
-        # Calculate attention scores
+        # Current shape:
         #
-        # queries:
-        # [batch_size, sequence_length, embedding_size]
-        #
-        # keys.transpose(-2, -1):
-        # [batch_size, embedding_size, sequence_length]
-        #
-        # scores:
-        # [batch_size, sequence_length, sequence_length]
-        scores = queries @ keys.transpose(-2, -1)
+        # [batch, sequence, embedding]
 
-        # Scale the scores
-        scale_factor = math.sqrt(embedding_size)
-        scores = scores / scale_factor
+        # -----------------------------
+        # SPLIT INTO HEADS
+        # -----------------------------
 
-        # Get the correct portion of the causal mask
-        mask = self.mask[
+        queries = queries.view(
+            batch_size,
+            sequence_length,
+            self.num_heads,
+            self.head_size
+        )
+
+        keys = keys.view(
+            batch_size,
+            sequence_length,
+            self.num_heads,
+            self.head_size
+        )
+
+        values = values.view(
+            batch_size,
+            sequence_length,
+            self.num_heads,
+            self.head_size
+        )
+
+        # Current:
+        #
+        # [batch, sequence, heads, head_size]
+        #
+        # We want:
+        #
+        # [batch, heads, sequence, head_size]
+
+        queries = queries.transpose(1, 2)
+        keys = keys.transpose(1, 2)
+        values = values.transpose(1, 2)
+
+        # -----------------------------
+        # ATTENTION SCORES
+        # -----------------------------
+
+        attention_scores = (
+            queries @ keys.transpose(-2, -1)
+        )
+
+        # Scale attention scores
+        attention_scores = (
+            attention_scores
+            / (self.head_size ** 0.5)
+        )
+
+        # Shape:
+        #
+        # [batch, heads, sequence, sequence]
+
+        # -----------------------------
+        # CAUSAL MASK
+        # -----------------------------
+
+        mask = self.causal_mask[
             :sequence_length,
             :sequence_length
         ]
 
-        # Apply causal mask
-        scores = scores.masked_fill(
+        attention_scores = attention_scores.masked_fill(
             mask == 0,
             float("-inf")
         )
 
-        # Convert scores into probabilities
-        attention_weights = torch.softmax(
-            scores,
+        # -----------------------------
+        # SOFTMAX
+        # -----------------------------
+
+        attention_weights = F.softmax(
+            attention_scores,
             dim=-1
         )
 
-        # Combine attention weights with Value vectors
+        # -----------------------------
+        # APPLY ATTENTION TO VALUES
+        # -----------------------------
+
         output = attention_weights @ values
+
+        # Shape:
+        #
+        # [batch, heads, sequence, head_size]
+
+        # -----------------------------
+        # COMBINE HEADS
+        # -----------------------------
+
+        output = output.transpose(1, 2)
+
+        # Shape:
+        #
+        # [batch, sequence, heads, head_size]
+
+        output = output.contiguous().view(
+            batch_size,
+            sequence_length,
+            embedding_size
+        )
+
+        # Back to:
+        #
+        # [batch, sequence, embedding]
+
+        # -----------------------------
+        # OUTPUT PROJECTION
+        # -----------------------------
+
+        output = self.output_projection(
+            output
+        )
 
         return output
 
 
-# Test the SelfAttention module
+# -----------------------------
+# TEST
+# -----------------------------
+
 if __name__ == "__main__":
+
     torch.manual_seed(42)
 
-    embedding_size = 4
-    context_length = 8
     batch_size = 3
+    sequence_length = 8
 
-    # Create example batched input
+    embedding_size = 128
+    num_heads = 4
+    context_length = 128
+
     x = torch.randn(
         batch_size,
-        context_length,
+        sequence_length,
         embedding_size
     )
 
-    attention = SelfAttention(
-        embedding_size,
-        context_length
+    attention = MultiHeadSelfAttention(
+        embedding_size=embedding_size,
+        num_heads=num_heads,
+        context_length=context_length
     )
 
     output = attention(x)
 
     print("Input shape:")
     print(x.shape)
+
+    print("\nNumber of heads:")
+    print(num_heads)
+
+    print("\nSize of each head:")
+    print(attention.head_size)
 
     print("\nOutput shape:")
     print(output.shape)

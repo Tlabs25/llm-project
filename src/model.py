@@ -5,140 +5,232 @@ from transformer_block import TransformerBlock
 
 
 class MiniGPT(nn.Module):
+
     def __init__(
         self,
         vocab_size,
         embedding_size,
         context_length,
-        num_layers
+        num_layers,
+        num_heads
     ):
         super().__init__()
 
-        # Save model settings
+        self.vocab_size = vocab_size
+        self.embedding_size = embedding_size
         self.context_length = context_length
 
-        # Token embeddings
+        # -----------------------------
+        # TOKEN EMBEDDINGS
+        # -----------------------------
+
         self.token_embedding = nn.Embedding(
             vocab_size,
             embedding_size
         )
 
-        # Position embeddings
+        # -----------------------------
+        # POSITION EMBEDDINGS
+        # -----------------------------
+
         self.position_embedding = nn.Embedding(
             context_length,
             embedding_size
         )
 
-        # Transformer blocks
-        self.blocks = nn.Sequential(
-            *[
-                TransformerBlock(
-                    embedding_size,
-                    context_length
-                )
-                for _ in range(num_layers)
-            ]
-        )
+        # -----------------------------
+        # TRANSFORMER BLOCKS
+        # -----------------------------
 
-        # Final normalization
-        self.final_norm = nn.LayerNorm(
+        self.transformer_blocks = nn.ModuleList([
+
+            TransformerBlock(
+                embedding_size=embedding_size,
+                num_heads=num_heads,
+                context_length=context_length
+            )
+
+            for _ in range(num_layers)
+        ])
+
+        # -----------------------------
+        # FINAL LAYER NORMALIZATION
+        # -----------------------------
+
+        self.final_layer_norm = nn.LayerNorm(
             embedding_size
         )
 
-        # Convert embeddings into vocabulary scores
+        # -----------------------------
+        # OUTPUT LAYER
+        # -----------------------------
+
         self.output_layer = nn.Linear(
             embedding_size,
             vocab_size
         )
 
+
     def forward(self, token_ids):
+
         # token_ids shape:
+        #
         # [batch_size, sequence_length]
 
         batch_size, sequence_length = token_ids.shape
 
-        # Create position IDs
+        # Prevent sequences longer than our
+        # configured context window.
+        if sequence_length > self.context_length:
+
+            raise ValueError(
+                f"Sequence length {sequence_length} "
+                f"exceeds context length "
+                f"{self.context_length}"
+            )
+
+        # -----------------------------
+        # TOKEN EMBEDDINGS
+        # -----------------------------
+
+        token_embeddings = self.token_embedding(
+            token_ids
+        )
+
+        # Shape:
+        #
+        # [batch, sequence, embedding]
+
+
+        # -----------------------------
+        # POSITION EMBEDDINGS
+        # -----------------------------
+
         positions = torch.arange(
             sequence_length,
             device=token_ids.device
         )
 
-        # Convert token IDs into vectors
+        position_embeddings = self.position_embedding(
+            positions
+        )
+
+        # Shape:
         #
-        # [batch_size, sequence_length]
-        #             ↓
-        # [batch_size, sequence_length, embedding_size]
-        token_vectors = self.token_embedding(token_ids)
+        # [sequence, embedding]
 
-        # Convert positions into vectors
-        #
-        # [sequence_length]
-        #         ↓
-        # [sequence_length, embedding_size]
-        position_vectors = self.position_embedding(positions)
 
-        # Add position information to every sequence
-        # PyTorch broadcasts position_vectors across the batch
-        x = token_vectors + position_vectors
+        # -----------------------------
+        # COMBINE EMBEDDINGS
+        # -----------------------------
 
-        # Pass through Transformer blocks
-        x = self.blocks(x)
+        x = (
+            token_embeddings
+            + position_embeddings
+        )
 
-        # Final normalization
-        x = self.final_norm(x)
+        # -----------------------------
+        # TRANSFORMER BLOCKS
+        # -----------------------------
 
-        # Convert into vocabulary scores
-        #
-        # [batch_size, sequence_length, embedding_size]
-        #                    ↓
-        # [batch_size, sequence_length, vocab_size]
+        for block in self.transformer_blocks:
+
+            x = block(x)
+
+        # -----------------------------
+        # FINAL LAYER NORM
+        # -----------------------------
+
+        x = self.final_layer_norm(x)
+
+        # -----------------------------
+        # OUTPUT LOGITS
+        # -----------------------------
+
         logits = self.output_layer(x)
+
+        # Shape:
+        #
+        # [batch, sequence, vocabulary]
 
         return logits
 
 
-# Test the complete model
+# -----------------------------
+# TEST MODEL
+# -----------------------------
+
 if __name__ == "__main__":
+
     torch.manual_seed(42)
 
-    # Model settings
-    vocab_size = 26
-    embedding_size = 4
-    context_length = 8
-    num_layers = 2
+    # New model configuration
+    vocab_size = 71
+    context_length = 128
 
-    # Create the model
+    embedding_size = 128
+    num_heads = 4
+    num_layers = 4
+
+    batch_size = 3
+
+    # Create model
     model = MiniGPT(
-        vocab_size,
-        embedding_size,
-        context_length,
-        num_layers
+        vocab_size=vocab_size,
+        embedding_size=embedding_size,
+        context_length=context_length,
+        num_layers=num_layers,
+        num_heads=num_heads
     )
 
-    # Create a batch of 3 sequences
-    token_ids = torch.tensor(
-        [
-            [3, 11, 8, 1, 6, 4, 21, 1],
-            [11, 8, 1, 6, 4, 21, 1, 20],
-            [8, 1, 6, 4, 21, 1, 20, 4]
-        ],
-        dtype=torch.long
+    # Create fake token data
+    token_ids = torch.randint(
+        low=0,
+        high=vocab_size,
+        size=(
+            batch_size,
+            context_length
+        )
     )
 
-    # Run the model
+    # Run model
     logits = model(token_ids)
 
-    print("Input token IDs:")
-    print(token_ids)
+    # -----------------------------
+    # PARAMETER COUNT
+    # -----------------------------
 
-    print("\nInput shape:")
+    total_parameters = sum(
+        parameter.numel()
+        for parameter in model.parameters()
+    )
+
+    trainable_parameters = sum(
+        parameter.numel()
+        for parameter in model.parameters()
+        if parameter.requires_grad
+    )
+
+    # -----------------------------
+    # OUTPUT
+    # -----------------------------
+
+    print("Input shape:")
     print(token_ids.shape)
 
     print("\nOutput logits shape:")
     print(logits.shape)
 
-    print("\nVocabulary scores for the first token")
-    print(logits[0, 0])
+    print("\nModel configuration:")
 
-    print("\nPredicted token IDs at each position:")
-    print(torch.argmax(logits, dim=-1))
+    print("Vocabulary size:", vocab_size)
+    print("Context length:", context_length)
+    print("Embedding size:", embedding_size)
+    print("Attention heads:", num_heads)
+    print("Transformer layers:", num_layers)
+
+    print("\nTotal parameters:")
+    print(f"{total_parameters:,}")
+
+    print("\nTrainable parameters:")
+    print(f"{trainable_parameters:,}")

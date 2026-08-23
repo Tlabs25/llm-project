@@ -1,67 +1,119 @@
 import torch
 import torch.nn as nn
 
-from self_attention import SelfAttention
-from feed_forward import FeedForward
+from self_attention import MultiHeadSelfAttention
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, embedding_size, context_length):
+
+    def __init__(
+        self,
+        embedding_size,
+        num_heads,
+        context_length
+    ):
         super().__init__()
 
-        # First normalization layer
-        self.norm1 = nn.LayerNorm(embedding_size)
+        # -----------------------------
+        # LAYER NORMALIZATION
+        # -----------------------------
 
-        # Self-attention layer
-        self.attention = SelfAttention(
-            embedding_size,
-            context_length
-        )
-
-        # Second normalization layer
-        self.norm2 = nn.LayerNorm(embedding_size)
-
-        # Feed-forward network
-        self.feed_forward = FeedForward(
+        self.layer_norm_1 = nn.LayerNorm(
             embedding_size
         )
 
+        self.layer_norm_2 = nn.LayerNorm(
+            embedding_size
+        )
+
+        # -----------------------------
+        # MULTI-HEAD SELF-ATTENTION
+        # -----------------------------
+
+        self.attention = MultiHeadSelfAttention(
+            embedding_size=embedding_size,
+            num_heads=num_heads,
+            context_length=context_length
+        )
+
+        # -----------------------------
+        # FEED-FORWARD NETWORK
+        # -----------------------------
+
+        self.feed_forward = nn.Sequential(
+
+            nn.Linear(
+                embedding_size,
+                embedding_size * 4
+            ),
+
+            nn.ReLU(),
+
+            nn.Linear(
+                embedding_size * 4,
+                embedding_size
+            )
+        )
+
+
     def forward(self, x):
-        # Normalize before attention
-        attention_input = self.norm1(x)
 
-        # Attention + residual connection
-        x = x + self.attention(attention_input)
+        # -----------------------------
+        # ATTENTION
+        # -----------------------------
 
-        # Normalize before feed-forward
-        feed_forward_input = self.norm2(x)
+        normalized_x = self.layer_norm_1(x)
 
-        # Feed-forward + residual connection
-        x = x + self.feed_forward(feed_forward_input)
+        attention_output = self.attention(
+            normalized_x
+        )
+
+        # Residual connection
+        x = x + attention_output
+
+        # -----------------------------
+        # FEED-FORWARD
+        # -----------------------------
+
+        normalized_x = self.layer_norm_2(x)
+
+        feed_forward_output = self.feed_forward(
+            normalized_x
+        )
+
+        # Residual connection
+        x = x + feed_forward_output
 
         return x
 
 
-# Test the TransformerBlock
+# -----------------------------
+# TEST
+# -----------------------------
+
 if __name__ == "__main__":
+
     torch.manual_seed(42)
 
-    embedding_size = 4
-    context_length = 8
+    batch_size = 3
+    sequence_length = 8
 
-    # Create example input
+    embedding_size = 128
+    num_heads = 4
+    context_length = 128
+
     x = torch.randn(
-        context_length,
+        batch_size,
+        sequence_length,
         embedding_size
     )
 
-    # Create the Transformer block
     transformer = TransformerBlock(
-        embedding_size,
-        context_length
+        embedding_size=embedding_size,
+        num_heads=num_heads,
+        context_length=context_length
     )
 
-    # Pass input through the block
     output = transformer(x)
 
     print("Input shape:")
@@ -70,5 +122,5 @@ if __name__ == "__main__":
     print("\nOutput shape:")
     print(output.shape)
 
-    print("\nTransformer output:")
-    print(output)
+    print("\nNumber of attention heads:")
+    print(num_heads)
